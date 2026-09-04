@@ -10,7 +10,7 @@ const SESSION_FILE = path.join(DATA_DIR, "sessions.json");
 const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const SESSION_COOKIE_MAX_AGE = Math.floor(SESSION_MAX_AGE_MS / 1000);
 const REMOTE_RETRY_COUNT = 3;
-const FULL_PAGE_DELAY_MS = 120;
+const FULL_PAGE_DELAY_MS = 1000;
 const SEARCH_JOB_TTL_MS = 30 * 60 * 1000;
 const sessions = new Map();
 const searchJobs = new Map();
@@ -19,7 +19,7 @@ const PLATFORMS = {
   ldxp: {
     id: "ldxp",
     name: "链动小店",
-    baseUrl: process.env.LDXP_BASE_URL || process.env.SOURCE_BASE_URL || "https://pay.ldxp.cn"
+    baseUrl: process.env.LDXP_BASE_URL || process.env.SOURCE_BASE_URL || "https://wzyp.cn"
   },
   catfk: {
     id: "catfk",
@@ -183,11 +183,12 @@ function sleep(ms) {
 }
 
 class RemoteHttpError extends Error {
-  constructor(message, status, data) {
+  constructor(message, status, data, retryable = false) {
     super(message);
     this.name = "RemoteHttpError";
     this.status = status;
     this.data = data;
+    this.retryable = retryable;
   }
 }
 
@@ -222,30 +223,30 @@ function readRequestBody(req) {
 
 async function postRemote(endpoint, payload, session, refererPath, options = {}) {
   const platform = getPlatform(session && session.platformId);
-  const headers = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Content-Type": "application/json",
-    "Origin": platform.baseUrl,
-    "Referer": `${platform.baseUrl}${refererPath || "/merchant/login"}`,
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-  };
-
-  if (session && session.token) {
-    headers["Merchant-Token"] = session.token;
-    headers.Authorization = `Bearer ${session.token}`;
-  }
-
-  const cookieHeader = buildRemoteCookieHeader(session);
-  if (cookieHeader) {
-    headers.Cookie = cookieHeader;
-  }
-
   const retries = Number(options.retries ?? REMOTE_RETRY_COUNT);
   let lastError;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
+      const headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Content-Type": "application/json",
+        "Origin": platform.baseUrl,
+        "Referer": `${platform.baseUrl}${refererPath || "/merchant/login"}`,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+      };
+
+      if (session && session.token) {
+        headers["Merchant-Token"] = session.token;
+        headers.Authorization = `Bearer ${session.token}`;
+      }
+
+      const cookieHeader = buildRemoteCookieHeader(session);
+      if (cookieHeader) {
+        headers.Cookie = cookieHeader;
+      }
+
       const response = await fetch(`${platform.baseUrl}${endpoint}`, {
         method: "POST",
         headers,
@@ -261,7 +262,12 @@ async function postRemote(endpoint, payload, session, refererPath, options = {})
       try {
         data = JSON.parse(text);
       } catch {
-        throw new RemoteHttpError(`远端返回非 JSON 内容，HTTP ${response.status}`, response.status, null);
+        const contentType = response.headers.get("content-type") || "";
+        const isHtml = contentType.includes("text/html") || /^\s*<(?:!doctype\s+html|html)/i.test(text);
+        const message = isHtml
+          ? `远端返回网页防护或登录页面，HTTP ${response.status}`
+          : `远端返回非 JSON 内容，HTTP ${response.status}`;
+        throw new RemoteHttpError(message, response.status, { contentType }, isHtml);
       }
 
       if (!response.ok) {
@@ -272,9 +278,12 @@ async function postRemote(endpoint, payload, session, refererPath, options = {})
     } catch (error) {
       lastError = error;
       const status = Number(error.status || 0);
-      const retryable = status >= 500 || status === 0;
+      const retryable = error.retryable || status >= 500 || status === 0;
       if (!retryable || attempt >= retries) break;
-      await sleep(400 * (attempt + 1));
+      const delayMs = error.retryable
+        ? 3000 * (2 ** attempt)
+        : 400 * (attempt + 1);
+      await sleep(delayMs);
     }
   }
 
@@ -372,9 +381,10 @@ async function handleLogout(req, res) {
 
 function normalizeSearchBody(body) {
   const current = Math.max(1, Number(body.current || 1));
-  const pageSize = Math.min(100, Math.max(1, Number(body.pageSize || 20)));
   const requestedPages = String(body.pages || 1);
   const fetchAllPages = requestedPages === "all";
+  const requestedPageSize = Math.min(100, Math.max(1, Number(body.pageSize || 20)));
+  const pageSize = fetchAllPages ? 100 : requestedPageSize;
   let pages = fetchAllPages ? 1 : Math.max(1, Number(requestedPages || 1));
   const keywords = String(body.keywords || "").trim();
   const goodsType = String(body.goods_type || "card").trim() || "card";

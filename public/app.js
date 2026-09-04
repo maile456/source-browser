@@ -91,7 +91,7 @@ function formatTime(value) {
 function getDetailLink(item) {
   if (item.link) return item.link;
   const key = item.goods_key || item.key;
-  const baseUrl = item.platform_base_url || "https://pay.ldxp.cn";
+  const baseUrl = item.platform_base_url || "https://wzyp.cn";
   return key ? `${baseUrl}/item/${encodeURIComponent(key)}` : "";
 }
 
