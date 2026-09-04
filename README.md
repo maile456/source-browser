@@ -54,7 +54,7 @@ http://localhost:3000
 项目默认连接的远端平台地址：
 
 ```text
-链动小店：https://pay.ldxp.cn
+链动小店：https://wzyp.cn
 ```
 
 如果需要切换远端地址，可以设置环境变量：
@@ -69,6 +69,18 @@ Windows PowerShell 示例：
 $env:LDXP_BASE_URL="https://example.com"; npm start
 ```
 
+### Windows 后台运行
+
+项目提供 `scripts/run-service.ps1`，从项目目录执行：
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -File .\scripts\run-service.ps1
+```
+
+脚本依赖 PATH 中的 `node.exe`，将服务输出追加到 `data/service.log`，并返回 Node.js 的退出码。直接执行时会持续占用当前终端，可按 `Ctrl+C` 停止。
+
+如需登录 Windows 后自动运行，可在 Windows 任务计划程序中将此脚本配置为登录时启动，并设置失败后重启、取消运行时长限制。脚本本身不会注册计划任务或自动重启；任务配置保存在本机，不随 Git 仓库同步。关机、休眠或注销期间无法保证服务可用。
+
 ## 使用方法
 
 1. 打开 `http://localhost:3000`。
@@ -78,6 +90,8 @@ $env:LDXP_BASE_URL="https://example.com"; npm start
 5. 点击查询，等待数据拉取完成后查看结果。
 
 如果选择“全部页”，工具会拉取所有页数据。全部页拉取较慢，且只有全部拉取成功才会展示本次结果；如果远端某一页失败，本次查询会失败，不返回部分数据。
+
+“全部页”模式会自动按每页 `100` 条请求，相邻页面之间等待 `1` 秒，以减少请求次数和频率。非全部页模式仍使用所选的每页数量。
 
 ## 功能
 
@@ -103,6 +117,8 @@ source-browser/
 │  └─ styles.css
 ├─ docs/
 │  └─ images/
+├─ scripts/
+│  └─ run-service.ps1
 ├─ server.js
 ├─ package.json
 ├─ .gitignore
@@ -142,6 +158,12 @@ data/sessions.json
 ### 出现远端 HTTP 500
 
 这通常表示远端平台接口临时异常或请求被远端拒绝。可以稍后重试，或减少查询范围后再查。
+
+### 出现“远端返回网页防护或登录页面”
+
+HTTP `200` 不代表返回的一定是 JSON；远端可能返回 HTML 防护页或登录页面。工具会使用响应更新后的 Cookie，分别等待 `3`、`6`、`12` 秒后重试，最多重试 `3` 次。重试仍失败会停止本次查询，不会自动完成远端验证。
+
+可以稍后缩小查询范围再试，或检查远端账号状态。远端网站与本地工具的浏览器会话相互独立，在远端完成登录不会自动更新本地工具保存的 Cookie。
 
 ### 会保存我的账号密码吗
 
