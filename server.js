@@ -12,8 +12,10 @@ const SESSION_COOKIE_MAX_AGE = Math.floor(SESSION_MAX_AGE_MS / 1000);
 const REMOTE_RETRY_COUNT = 3;
 const FULL_PAGE_DELAY_MS = 1000;
 const SEARCH_JOB_TTL_MS = 30 * 60 * 1000;
+const SUPPLIER_CODE_CACHE_TTL_MS = 10 * 60 * 1000;
 const sessions = new Map();
 const searchJobs = new Map();
+const supplierCodeCache = new Map();
 
 const PLATFORMS = {
   ldxp: {
@@ -250,7 +252,8 @@ async function postRemote(endpoint, payload, session, refererPath, options = {})
       const response = await fetch(`${platform.baseUrl}${endpoint}`, {
         method: "POST",
         headers,
-        body: JSON.stringify(payload || {})
+        body: JSON.stringify(payload || {}),
+        signal: options.signal
       });
 
       if (session) {
@@ -371,6 +374,8 @@ async function handleMe(req, res) {
 async function handleLogout(req, res) {
   const sid = parseCookies(req.headers.cookie).sid;
   if (sid) {
+    const session = sessions.get(sid);
+    if (session) supplierCodeCache.delete(`${session.platformId}:${session.token}`);
     sessions.delete(sid);
     saveSessions();
   }
@@ -402,6 +407,98 @@ function normalizeGoodsItem(item, platform) {
     platform_base_url: platform.baseUrl,
     link: item.link || (goodsKey ? `${platform.baseUrl}/item/${encodeURIComponent(goodsKey)}` : "")
   };
+}
+
+function normalizeSupplierCode(value) {
+  return typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+}
+
+async function fetchSupplierCodes(session, job) {
+  const now = Date.now();
+  for (const [key, entry] of supplierCodeCache) {
+    if (entry.expiresAt <= now) supplierCodeCache.delete(key);
+  }
+  const cacheKey = `${session.platformId}:${session.token}`;
+  const cached = supplierCodeCache.get(cacheKey);
+  if (cached) return cached.codes;
+
+  const codes = new Map();
+  let pages = 1;
+  let expectedTotal = 0;
+  let loaded = 0;
+  for (let page = 1; page <= pages; page += 1) {
+    if (job && job.cancelled) throw new SearchCancelledError();
+    const response = await postRemote(
+      "/merchantApi/GoodsPool/list",
+      { current: page, pageSize: 100, tags_id: 0 },
+      session,
+      "/merchant/my_parent/source_square",
+      { retries: 0, signal: AbortSignal.timeout(15000) }
+    );
+    if (job && job.cancelled) throw new SearchCancelledError();
+    if (response.code !== 1) throw new Error(response.msg || "货源商名片查询失败");
+
+    const data = response.data;
+    const total = Number(data && data.total);
+    if (!data || !Array.isArray(data.list) || !Number.isInteger(total) || total < 0) {
+      throw new Error("货源商名片数据格式异常");
+    }
+    if (page === 1) {
+      expectedTotal = total;
+      pages = Math.max(1, Math.ceil(total / 100));
+    }
+    if (!data.list.length && total > 0) throw new Error("货源商名片分页数据不完整");
+    loaded += data.list.length;
+
+    for (const entry of data.list) {
+      const user = entry && entry.user;
+      const id = user && user.id != null ? String(user.id).trim() : "";
+      const code = normalizeSupplierCode(user && user.agent_key);
+      if (id && code) codes.set(id, code);
+    }
+    if (job) {
+      job.supplierLoadedPages = page;
+      job.supplierTotalPages = pages;
+      job.updatedAt = Date.now();
+    }
+    if (page < pages) await sleep(FULL_PAGE_DELAY_MS);
+  }
+  if (loaded < expectedTotal) throw new Error("货源商名片分页数据不完整");
+  supplierCodeCache.set(cacheKey, { codes, expiresAt: Date.now() + SUPPLIER_CODE_CACHE_TTL_MS });
+  return codes;
+}
+
+async function attachSupplierCodes(list, session, job) {
+  if (!list.length) return "";
+  let codes = new Map();
+  let missingStatus = "not_found";
+  let warning = "";
+  const needsLookup = list.some(item => !normalizeSupplierCode(item.user && item.user.agent_key));
+  if (needsLookup && session.platformId !== "ldxp") {
+    missingStatus = "unsupported";
+    warning = "当前平台暂未接入供货商对接码查询";
+  } else if (needsLookup) {
+    if (job) {
+      job.phase = "suppliers";
+      job.updatedAt = Date.now();
+    }
+    try {
+      codes = await fetchSupplierCodes(session, job);
+    } catch (error) {
+      if (error instanceof SearchCancelledError) throw error;
+      missingStatus = "unavailable";
+      warning = "供货商对接码暂未获取，商品结果已保留，请稍后重新查询";
+    }
+  }
+  if (job && job.cancelled) throw new SearchCancelledError();
+  for (const item of list) {
+    // Match stable supplier IDs, never shop names or product keys.
+    const id = String(item.user_id ?? (item.user && item.user.id) ?? "").trim();
+    const code = normalizeSupplierCode(item.user && item.user.agent_key) || codes.get(id) || "";
+    item.supplier_agent_key = code || null;
+    item.supplier_code_status = code ? "available" : missingStatus;
+  }
+  return warning;
 }
 
 async function fetchSearchResults(session, params, job = null) {
@@ -467,12 +564,14 @@ async function fetchSearchResults(session, params, job = null) {
     }
   }
 
+  const supplierCodeWarning = await attachSupplierCodes(list, session, job);
   saveSessions();
   return {
     ok: true,
     total,
     loaded: list.length,
     loadedPages: pages,
+    supplier_code_warning: supplierCodeWarning,
     list
   };
 }
@@ -518,7 +617,10 @@ async function handleSearchStart(req, res) {
     loaded: 0,
     total: 0,
     result: null,
-    error: ""
+    error: "",
+    phase: "goods",
+    supplierLoadedPages: 0,
+    supplierTotalPages: 0
   };
 
   searchJobs.set(id, job);
@@ -565,6 +667,9 @@ async function handleSearchStatus(req, res) {
     loaded: job.loaded,
     total: job.total,
     error: job.error,
+    phase: job.phase,
+    supplierLoadedPages: job.supplierLoadedPages,
+    supplierTotalPages: job.supplierTotalPages,
     result: job.status === "done" ? job.result : null
   });
 }

@@ -343,7 +343,31 @@ td:nth-child(5) {
 
 th:nth-child(6),
 td:nth-child(6) {
+  min-width: 140px;
+}
+
+th:nth-child(7),
+td:nth-child(7) {
   min-width: 88px;
+}
+
+.supplier-code {
+  max-width: 240px;
+  overflow-wrap: anywhere;
+}
+
+.supplier-code code {
+  font-family: Consolas, monospace;
+  user-select: all;
+}
+
+.query-warning {
+  margin: 0;
+  padding: 12px 24px;
+  color: var(--warn);
+  background: #fffaeb;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
 }
 
 .goods-name {

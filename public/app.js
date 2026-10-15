@@ -24,6 +24,7 @@ const loginForm = document.querySelector("#loginForm");
 const searchForm = document.querySelector("#searchForm");
 const resultBody = document.querySelector("#resultBody");
 const summaryText = document.querySelector("#summaryText");
+const supplierCodeWarning = document.querySelector("#supplierCodeWarning");
 const pageText = document.querySelector("#pageText");
 const prevPage = document.querySelector("#prevPage");
 const nextPage = document.querySelector("#nextPage");
@@ -198,7 +199,7 @@ function getVisibleResults() {
 function renderTable() {
   const { rows } = getVisibleResults();
   if (!rows.length) {
-    resultBody.innerHTML = '<tr><td colspan="6" class="empty">暂无结果</td></tr>';
+    resultBody.innerHTML = '<tr><td colspan="7" class="empty">暂无结果</td></tr>';
     updateSummary();
     return;
   }
@@ -211,6 +212,10 @@ function renderTable() {
     const detailLink = getDetailLink(item);
     const safeLink = escapeHtml(detailLink);
     const name = escapeHtml(item.name || "未命名货源");
+    const supplierCode = item.supplier_agent_key;
+    const supplierCodeText = supplierCode != null && String(supplierCode) !== ""
+      ? `<code>${escapeHtml(supplierCode)}</code>`
+      : `<span class="goods-meta">${item.supplier_code_status === "unavailable" ? "暂未获取" : item.supplier_code_status === "unsupported" ? "暂不支持" : "未匹配"}</span>`;
     const keyHtml = detailLink
       ? `<a class="key-link" href="${safeLink}" target="_blank" rel="noopener noreferrer">${escapeHtml(key)}</a>`
       : escapeHtml(key);
@@ -229,6 +234,7 @@ function renderTable() {
         <td>${stock}</td>
         <td class="price">${formatPrice(getPrice(item))}</td>
         <td>${keyHtml}</td>
+        <td class="supplier-code">${supplierCodeText}</td>
         <td>${actionHtml}</td>
       </tr>
     `;
@@ -277,6 +283,14 @@ function showProgress(visible) {
 
 function updateProgress(job) {
   showProgress(true);
+  if (job.phase === "suppliers") {
+    const loaded = Number(job.supplierLoadedPages || 0);
+    const total = Number(job.supplierTotalPages || 0);
+    progressBar.style.width = `${total ? Math.min(100, Math.round(loaded / total * 100)) : 8}%`;
+    progressText.textContent = "正在获取供货商对接码";
+    progressMeta.textContent = total ? `已读取 ${loaded} / ${total} 页名片` : "正在读取货源商名片";
+    return;
+  }
   const totalPages = Number(job.totalPages || 0);
   const loadedPages = Number(job.loadedPages || 0);
   const percent = totalPages ? Math.min(100, Math.round((loadedPages / totalPages) * 100)) : 8;
@@ -335,6 +349,8 @@ async function pollSearchJob(jobId) {
     state.localPage = 1;
     state.lastSuccessAt = Date.now();
     state.lastError = "";
+    supplierCodeWarning.textContent = job.result.supplier_code_warning || "";
+    supplierCodeWarning.classList.toggle("hidden", !supplierCodeWarning.textContent);
     renderTable();
     progressBar.style.width = "100%";
     progressText.textContent = "查询完成";
@@ -356,7 +372,7 @@ function handleSearchError(error) {
   setLoading(false);
   showToast(error.message);
     if (!state.list.length) {
-      resultBody.innerHTML = '<tr><td colspan="6" class="empty">查询失败</td></tr>';
+      resultBody.innerHTML = '<tr><td colspan="7" class="empty">查询失败</td></tr>';
   }
   if (error.status === 401 || /请先登录|登录/.test(error.message)) {
     showLogin();
@@ -430,6 +446,8 @@ function showLogin() {
   loginPanel.classList.remove("hidden");
   state.total = 0;
   state.list = [];
+  supplierCodeWarning.textContent = "";
+  supplierCodeWarning.classList.add("hidden");
   state.current = 1;
   state.localPage = 1;
   updateSummary();
